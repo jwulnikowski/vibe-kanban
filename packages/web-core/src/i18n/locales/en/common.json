@@ -92,6 +92,8 @@
     "description": "Sign in to join organizations and share tasks with your team",
     "continueWithGitHub": "Continue with GitHub",
     "continueWithGoogle": "Continue with Google",
+    "continueWithMicrosoft": "Continue with Microsoft",
+    "continueWithOkta": "Continue with Okta",
     "waitingTitle": "Complete Authentication",
     "waitingDescription": "A popup window has been opened for authentication",
     "waitingForAuth": "Waiting for authentication...",

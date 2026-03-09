@@ -9,8 +9,8 @@ use crate::{
     analytics::{AnalyticsConfig, AnalyticsService},
     attachments::cleanup::spawn_cleanup_task,
     auth::{
-        GitHubOAuthProvider, GoogleOAuthProvider, JwtService, OAuthHandoffService,
-        OAuthTokenValidator, ProviderRegistry,
+        GitHubOAuthProvider, GoogleOAuthProvider, JwtService, MicrosoftOAuthProvider,
+        OAuthHandoffService, OAuthTokenValidator, OktaOAuthProvider, ProviderRegistry,
     },
     azure_blob::AzureBlobService,
     billing::BillingService,
@@ -70,6 +70,29 @@ impl Server {
             registry.register(GoogleOAuthProvider::new(
                 google.client_id().to_string(),
                 google.client_secret().clone(),
+            )?);
+        }
+
+        if let Some(microsoft) = auth_config.microsoft() {
+            let tenant = std::env::var("MICROSOFT_OAUTH_TENANT_ID")
+                .ok()
+                .filter(|t| !t.is_empty());
+            registry.register(MicrosoftOAuthProvider::new(
+                microsoft.client_id().to_string(),
+                microsoft.client_secret().clone(),
+                tenant,
+            )?);
+        }
+
+        if let Some(okta) = auth_config.okta() {
+            let domain = std::env::var("OKTA_OAUTH_DOMAIN").map_err(|_| {
+                anyhow::anyhow!("OKTA_OAUTH_DOMAIN is required when OKTA_OAUTH_CLIENT_ID is set")
+            })?;
+            tracing::info!("Registering Okta OAuth provider with domain: {}", domain);
+            registry.register(OktaOAuthProvider::new(
+                okta.client_id().to_string(),
+                okta.client_secret().clone(),
+                domain,
             )?);
         }
 

@@ -4,7 +4,7 @@ import { GitHubDark } from 'developer-icons';
 import { useTranslation } from 'react-i18next';
 import { GoogleLogo } from './GoogleLogo';
 
-export type OAuthProvider = 'github' | 'google';
+export type OAuthProvider = 'github' | 'google' | 'microsoft' | 'okta';
 
 interface OAuthSignInButtonProps {
   provider: OAuthProvider;
@@ -15,6 +15,21 @@ interface OAuthSignInButtonProps {
   className?: string;
 }
 
+const MicrosoftLogo = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 23 23" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="10" height="10" fill="#F25022"/>
+    <rect x="11" width="10" height="10" fill="#7FBA00"/>
+    <rect y="11" width="10" height="10" fill="#00A4EF"/>
+    <rect x="11" y="11" width="10" height="10" fill="#FFB900"/>
+  </svg>
+);
+
+const OktaLogo = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 0C5.389 0 0 5.389 0 12s5.389 12 12 12 12-5.389 12-12S18.611 0 12 0zm0 18.75a6.75 6.75 0 110-13.5 6.75 6.75 0 010 13.5zm0-10.5a3.75 3.75 0 100 7.5 3.75 3.75 0 000-7.5z"/>
+  </svg>
+);
+
 const providerConfig = {
   github: {
     i18nKey: 'oauth.continueWithGitHub' as const,
@@ -23,6 +38,14 @@ const providerConfig = {
   google: {
     i18nKey: 'oauth.continueWithGoogle' as const,
     icon: () => <GoogleLogo className="size-5" />,
+  },
+  microsoft: {
+    i18nKey: 'oauth.continueWithMicrosoft' as const,
+    icon: () => <MicrosoftLogo className="size-5" />,
+  },
+  okta: {
+    i18nKey: 'oauth.continueWithOkta' as const,
+    icon: () => <OktaLogo className="size-5" />,
   },
 };
 

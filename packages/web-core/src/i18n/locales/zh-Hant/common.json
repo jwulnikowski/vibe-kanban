@@ -88,6 +88,8 @@
     "description": "登入以加入組織並與團隊共享任務",
     "continueWithGitHub": "使用 GitHub 繼續",
     "continueWithGoogle": "使用 Google 繼續",
+    "continueWithMicrosoft": "使用 Microsoft 繼續",
+    "continueWithOkta": "使用 Okta 繼續",
     "waitingTitle": "完成身分驗證",
     "waitingDescription": "已開啟彈出視窗進行驗證",
     "waitingForAuth": "等待身分驗證...",

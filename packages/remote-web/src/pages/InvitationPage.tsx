@@ -147,6 +147,20 @@ export default function InvitationPage() {
                 disabled={pendingProvider !== null}
                 loading={pendingProvider === "google"}
               />
+              <OAuthButton
+                provider="microsoft"
+                label="Continue with Microsoft"
+                onClick={() => void handleOAuthLogin("microsoft")}
+                disabled={pendingProvider !== null}
+                loading={pendingProvider === "microsoft"}
+              />
+              <OAuthButton
+                provider="okta"
+                label="Continue with Okta"
+                onClick={() => void handleOAuthLogin("okta")}
+                disabled={pendingProvider !== null}
+                loading={pendingProvider === "okta"}
+              />
             </div>
           </section>
         </div>
@@ -168,6 +182,7 @@ function OAuthButton({
   disabled?: boolean;
   loading?: boolean;
 }) {
+  const providerLabel = provider === "github" ? "GitHub" : provider === "google" ? "Google" : provider === "microsoft" ? "Microsoft" : "Okta";
   return (
     <button
       type="button"
@@ -177,7 +192,7 @@ function OAuthButton({
       disabled={disabled || loading}
     >
       {loading
-        ? `Opening ${provider === "github" ? "GitHub" : "Google"}...`
+        ? `Opening ${providerLabel}...`
         : label}
     </button>
   );

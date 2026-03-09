@@ -254,6 +254,22 @@ export default function UpgradePage() {
                     disabled={oauthLoading !== null}
                     loading={oauthLoading === "google"}
                   />
+                  <OAuthButton
+                    label="Continue with Microsoft"
+                    onClick={() => {
+                      void handleOAuthLogin("microsoft");
+                    }}
+                    disabled={oauthLoading !== null}
+                    loading={oauthLoading === "microsoft"}
+                  />
+                  <OAuthButton
+                    label="Continue with Okta"
+                    onClick={() => {
+                      void handleOAuthLogin("okta");
+                    }}
+                    disabled={oauthLoading !== null}
+                    loading={oauthLoading === "okta"}
+                  />
                 </div>
 
                 <button

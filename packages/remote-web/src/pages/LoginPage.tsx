@@ -70,6 +70,20 @@ export default function LoginPage() {
               disabled={pending !== null}
               loading={pending === "google"}
             />
+            <OAuthButton
+              provider="microsoft"
+              label="Continue with Microsoft"
+              onClick={() => void handleLogin("microsoft")}
+              disabled={pending !== null}
+              loading={pending === "microsoft"}
+            />
+            <OAuthButton
+              provider="okta"
+              label="Continue with Okta"
+              onClick={() => void handleLogin("okta")}
+              disabled={pending !== null}
+              loading={pending === "okta"}
+            />
           </section>
 
           <p className="text-center text-sm text-low">
@@ -102,6 +116,7 @@ function OAuthButton({
   disabled?: boolean;
   loading?: boolean;
 }) {
+  const providerLabel = provider === "github" ? "GitHub" : provider === "google" ? "Google" : provider === "microsoft" ? "Microsoft" : "Okta";
   return (
     <button
       type="button"
@@ -111,7 +126,7 @@ function OAuthButton({
       disabled={disabled || loading}
     >
       {loading
-        ? `Opening ${provider === "github" ? "GitHub" : "Google"}...`
+        ? `Opening ${providerLabel}...`
         : label}
     </button>
   );

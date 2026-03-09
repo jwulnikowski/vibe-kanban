@@ -56,7 +56,9 @@ type SignInCompletionMethod =
   | 'continue_logged_in'
   | 'skip_sign_in'
   | 'oauth_github'
-  | 'oauth_google';
+  | 'oauth_google'
+  | 'oauth_microsoft'
+  | 'oauth_okta';
 function resolveTheme(theme: ThemeMode): 'light' | 'dark' {
   if (theme === ThemeMode.SYSTEM) {
     return window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -207,8 +209,15 @@ export function OnboardingSignInPage() {
     });
 
     if (profile) {
+      const method: SignInCompletionMethod = provider === 'github' 
+        ? 'oauth_github' 
+        : provider === 'google' 
+          ? 'oauth_google'
+          : provider === 'microsoft'
+            ? 'oauth_microsoft'
+            : 'oauth_okta';
       await finishOnboarding({
-        method: provider === 'github' ? 'oauth_github' : 'oauth_google',
+        method,
       });
     }
   };
@@ -281,6 +290,20 @@ export function OnboardingSignInPage() {
                   disabled={saving || pendingProvider !== null}
                   loading={pendingProvider === 'google'}
                   loadingText="Opening Google..."
+                />
+                <OAuthSignInButton
+                  provider="microsoft"
+                  onClick={() => void handleProviderSignIn('microsoft')}
+                  disabled={saving || pendingProvider !== null}
+                  loading={pendingProvider === 'microsoft'}
+                  loadingText="Opening Microsoft..."
+                />
+                <OAuthSignInButton
+                  provider="okta"
+                  onClick={() => void handleProviderSignIn('okta')}
+                  disabled={saving || pendingProvider !== null}
+                  loading={pendingProvider === 'okta'}
+                  loadingText="Opening Okta..."
                 />
               </section>
 

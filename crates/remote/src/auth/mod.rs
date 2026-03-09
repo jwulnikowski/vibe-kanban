@@ -9,5 +9,5 @@ pub use jwt::{JwtError, JwtService};
 pub use middleware::{RequestContext, require_session};
 pub use oauth_token_validator::{OAuthTokenValidationError, OAuthTokenValidator};
 pub use provider::{
-    GitHubOAuthProvider, GoogleOAuthProvider, ProviderRegistry, ProviderTokenDetails,
+    GitHubOAuthProvider, GoogleOAuthProvider, MicrosoftOAuthProvider, OktaOAuthProvider, ProviderRegistry, ProviderTokenDetails,
 };

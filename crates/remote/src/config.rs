@@ -310,6 +310,8 @@ impl OAuthProviderConfig {
 pub struct AuthConfig {
     github: Option<OAuthProviderConfig>,
     google: Option<OAuthProviderConfig>,
+    microsoft: Option<OAuthProviderConfig>,
+    okta: Option<OAuthProviderConfig>,
     jwt_secret: SecretString,
     public_base_url: String,
 }
@@ -345,7 +347,48 @@ impl AuthConfig {
             _ => None,
         };
 
-        if github.is_none() && google.is_none() {
+        let microsoft = match env::var("MICROSOFT_OAUTH_CLIENT_ID") {
+            Ok(client_id) if !client_id.is_empty() => {
+                let client_secret = env::var("MICROSOFT_OAUTH_CLIENT_SECRET")
+                    .map_err(|_| ConfigError::MissingVar("MICROSOFT_OAUTH_CLIENT_SECRET"))?;
+                Some(OAuthProviderConfig::new(
+                    client_id,
+                    SecretString::new(client_secret.into()),
+                ))
+            }
+            _ => None,
+        };
+
+        let okta = match env::var("OKTA_OAUTH_CLIENT_ID") {
+            Ok(client_id) if !client_id.is_empty() => {
+                let client_secret = env::var("OKTA_OAUTH_CLIENT_SECRET")
+                    .map_err(|_| ConfigError::MissingVar("OKTA_OAUTH_CLIENT_SECRET"))?;
+                let domain = env::var("OKTA_OAUTH_DOMAIN")
+                    .map_err(|_| ConfigError::MissingVar("OKTA_OAUTH_DOMAIN"))?;
+                tracing::info!(
+                    "Okta OAuth config found, client_id: {}, domain: {}",
+                    client_id,
+                    domain
+                );
+                Some(OAuthProviderConfig::new(
+                    client_id,
+                    SecretString::new(client_secret.into()),
+                ))
+            }
+            _ => {
+                tracing::info!("OKTA_OAUTH_CLIENT_ID not set or empty");
+                None
+            }
+        };
+
+        if github.is_none() && google.is_none() && microsoft.is_none() && okta.is_none() {
+            tracing::warn!(
+                "No OAuth providers configured - GITHUB_OAUTH_CLIENT_ID: {}, GOOGLE_OAUTH_CLIENT_ID: {}, MICROSOFT_OAUTH_CLIENT_ID: {}, OKTA_OAUTH_CLIENT_ID: {}",
+                env::var("GITHUB_OAUTH_CLIENT_ID").unwrap_or_default(),
+                env::var("GOOGLE_OAUTH_CLIENT_ID").unwrap_or_default(),
+                env::var("MICROSOFT_OAUTH_CLIENT_ID").unwrap_or_default(),
+                env::var("OKTA_OAUTH_CLIENT_ID").unwrap_or_default()
+            );
             return Err(ConfigError::NoOAuthProviders);
         }
 
@@ -355,6 +398,8 @@ impl AuthConfig {
         Ok(Self {
             github,
             google,
+            microsoft,
+            okta,
             jwt_secret,
             public_base_url,
         })
@@ -366,6 +411,21 @@ impl AuthConfig {
 
     pub fn google(&self) -> Option<&OAuthProviderConfig> {
         self.google.as_ref()
+    }
+
+    pub fn microsoft(&self) -> Option<&OAuthProviderConfig> {
+        self.microsoft.as_ref()
+    }
+
+    pub fn okta(&self) -> Option<&OAuthProviderConfig> {
+        self.okta.as_ref()
+    }
+
+    pub fn okta_domain(&self) -> Option<String> {
+        self.okta
+            .as_ref()
+            .map(|_| env::var("OKTA_OAUTH_DOMAIN").ok().filter(|d| !d.is_empty()))
+            .flatten()
     }
 
     pub fn jwt_secret(&self) -> &SecretString {

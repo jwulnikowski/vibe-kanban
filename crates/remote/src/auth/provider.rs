@@ -97,6 +97,12 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+
+    pub fn providers(
+        &self,
+    ) -> std::collections::hash_map::Keys<String, Arc<dyn AuthorizationProvider>> {
+        self.providers.keys()
+    }
 }
 
 pub struct GitHubOAuthProvider {
@@ -681,6 +687,683 @@ impl AuthorizationProvider for GoogleOAuthProvider {
                     if attempt >= max_retries {
                         return Err(TokenValidationError::temporary(format!(
                             "unexpected tokeninfo status: {status}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+pub struct MicrosoftOAuthProvider {
+    client: Client,
+    client_id: String,
+    client_secret: SecretString,
+    tenant: String,
+}
+
+impl MicrosoftOAuthProvider {
+    pub fn new(
+        client_id: String,
+        client_secret: SecretString,
+        tenant: Option<String>,
+    ) -> Result<Self> {
+        let client = Client::builder().user_agent(USER_AGENT).build()?;
+        let tenant = tenant.unwrap_or_else(|| "common".to_string());
+        Ok(Self {
+            client,
+            client_id,
+            client_secret,
+            tenant,
+        })
+    }
+
+    fn authorization_endpoint(&self) -> String {
+        format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+            self.tenant
+        )
+    }
+
+    fn token_endpoint(&self) -> String {
+        format!(
+            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+            self.tenant
+        )
+    }
+
+    async fn try_refresh_access_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<ProviderTokenDetails, TokenValidationError> {
+        let response = match self
+            .client
+            .post(self.token_endpoint())
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Err(TokenValidationError::temporary(format!(
+                    "refresh request failed: {err}"
+                )));
+            }
+        };
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                #[derive(Debug, Deserialize)]
+                struct RefreshResponse {
+                    access_token: String,
+                    expires_in: i64,
+                    #[serde(default)]
+                    refresh_token: Option<String>,
+                }
+
+                let refresh_data: RefreshResponse = response
+                    .json()
+                    .await
+                    .map_err(|err| TokenValidationError::temporary(format!("{err}")))?;
+                let expires_at = chrono::Utc::now().timestamp() + refresh_data.expires_in;
+
+                let new_refresh_token = refresh_data
+                    .refresh_token
+                    .unwrap_or_else(|| refresh_token.to_string());
+
+                Ok(ProviderTokenDetails {
+                    provider: self.name().to_string(),
+                    access_token: refresh_data.access_token,
+                    refresh_token: Some(new_refresh_token),
+                    expires_at: Some(expires_at),
+                })
+            }
+            reqwest::StatusCode::BAD_REQUEST => Err(TokenValidationError::InvalidOrRevoked),
+            status if status.is_server_error() => Err(TokenValidationError::temporary(format!(
+                "token refresh server error: {status}"
+            ))),
+            status => Err(TokenValidationError::temporary(format!(
+                "unexpected token refresh status: {status}"
+            ))),
+        }
+    }
+
+    async fn refresh_token(
+        &self,
+        refresh_token: &str,
+        max_retries: u32,
+    ) -> Result<ProviderTokenDetails, TokenValidationError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+
+            match self.try_refresh_access_token(refresh_token).await {
+                Ok(new_token_details) => return Ok(new_token_details),
+                Err(TokenValidationError::InvalidOrRevoked) => {
+                    return Err(TokenValidationError::InvalidOrRevoked);
+                }
+                Err(TokenValidationError::Temporary(err)) => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::Temporary(err));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MicrosoftTokenResponse {
+    Success {
+        access_token: String,
+        token_type: String,
+        scope: Option<String>,
+        expires_in: Option<i64>,
+        refresh_token: Option<String>,
+        id_token: Option<String>,
+    },
+    Error {
+        error: String,
+        error_description: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct MicrosoftUser {
+    id: String,
+    displayName: Option<String>,
+    #[serde(rename = "mail")]
+    email: Option<String>,
+    userPrincipalName: Option<String>,
+    givenName: Option<String>,
+    surname: Option<String>,
+    #[serde(rename = "photo")]
+    photo: Option<String>,
+}
+
+#[async_trait]
+impl AuthorizationProvider for MicrosoftOAuthProvider {
+    fn name(&self) -> &'static str {
+        "microsoft"
+    }
+
+    fn scopes(&self) -> &[&str] {
+        &["openid", "email", "profile", "User.Read"]
+    }
+
+    fn authorize_url(&self, state: &str, redirect_uri: &str) -> Result<Url> {
+        let mut url = Url::parse(&self.authorization_endpoint())?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("client_id", &self.client_id);
+            qp.append_pair("redirect_uri", redirect_uri);
+            qp.append_pair("response_type", "code");
+            qp.append_pair("scope", &self.scopes().join(" "));
+            qp.append_pair("state", state);
+            qp.append_pair("response_mode", "query");
+        }
+        Ok(url)
+    }
+
+    async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<AuthorizationGrant> {
+        let response = self
+            .client
+            .post(self.token_endpoint())
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+                ("code", code),
+                ("grant_type", "authorization_code"),
+                ("redirect_uri", redirect_uri),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+
+        match response.json::<MicrosoftTokenResponse>().await? {
+            MicrosoftTokenResponse::Success {
+                access_token,
+                token_type,
+                scope,
+                expires_in,
+                refresh_token,
+                id_token,
+            } => {
+                let scopes = scope
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|value| {
+                        let trimmed = value.trim();
+                        (!trimmed.is_empty()).then_some(trimmed.to_string())
+                    })
+                    .collect();
+
+                Ok(AuthorizationGrant {
+                    access_token: SecretString::new(access_token.into()),
+                    token_type,
+                    scopes,
+                    refresh_token: refresh_token.map(|v| SecretString::new(v.into())),
+                    expires_in: expires_in.map(Duration::seconds),
+                    id_token: id_token.map(|v| SecretString::new(v.into())),
+                })
+            }
+            MicrosoftTokenResponse::Error {
+                error,
+                error_description,
+            } => {
+                let detail = error_description.unwrap_or_else(|| error.clone());
+                anyhow::bail!("microsoft token exchange failed: {detail}")
+            }
+        }
+    }
+
+    async fn fetch_user(&self, access_token: &SecretString) -> Result<ProviderUser> {
+        let bearer = format!("Bearer {}", access_token.expose_secret());
+
+        let profile: MicrosoftUser = self
+            .client
+            .get("https://graph.microsoft.com/v1.0/me")
+            .header("Authorization", bearer)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let login = profile.email.clone().or(profile.userPrincipalName.clone());
+        let name = profile
+            .displayName
+            .or_else(|| match (profile.givenName, profile.surname) {
+                (Some(first), Some(last)) => Some(format!("{first} {last}")),
+                (Some(first), None) => Some(first),
+                (None, Some(last)) => Some(last),
+                (None, None) => None,
+            });
+
+        Ok(ProviderUser {
+            id: profile.id,
+            login,
+            email: profile.email.or(profile.userPrincipalName),
+            name,
+            avatar_url: profile.photo,
+        })
+    }
+
+    async fn validate_token(
+        &self,
+        token_details: &ProviderTokenDetails,
+        max_retries: u32,
+    ) -> Result<Option<ProviderTokenDetails>, TokenValidationError> {
+        let mut attempt = 0;
+        let access_token = SecretString::new(token_details.access_token.clone().into_boxed_str());
+
+        loop {
+            attempt += 1;
+
+            if let Some(expires_at) = token_details.expires_at
+                && let now = chrono::Utc::now().timestamp()
+                && now >= expires_at - TOKEN_EXPIRATION_LEEWAY_SECONDS
+            {
+                let Some(refresh_token) = &token_details.refresh_token else {
+                    return Err(TokenValidationError::InvalidOrRevoked);
+                };
+
+                info!("Token expired, attempting refresh for Microsoft OAuth");
+                return self
+                    .refresh_token(refresh_token, max_retries)
+                    .await
+                    .map(Some);
+            }
+
+            let response = match self
+                .client
+                .get("https://graph.microsoft.com/v1.0/me")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", access_token.expose_secret()),
+                )
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "userinfo request failed: {err}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                    continue;
+                }
+            };
+
+            match response.status() {
+                reqwest::StatusCode::OK => {
+                    return Ok(None);
+                }
+                reqwest::StatusCode::UNAUTHORIZED => {
+                    let Some(refresh_token) = &token_details.refresh_token else {
+                        return Err(TokenValidationError::InvalidOrRevoked);
+                    };
+                    info!("Token expired during validation, attempting refresh");
+                    return self
+                        .refresh_token(refresh_token, max_retries)
+                        .await
+                        .map(Some);
+                }
+                status if status.is_server_error() => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "microsoft userinfo server error: {status}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+                status => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "unexpected userinfo status: {status}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+pub struct OktaOAuthProvider {
+    client: Client,
+    client_id: String,
+    client_secret: SecretString,
+    domain: String,
+}
+
+impl OktaOAuthProvider {
+    pub fn new(client_id: String, client_secret: SecretString, domain: String) -> Result<Self> {
+        let client = Client::builder().user_agent(USER_AGENT).build()?;
+        Ok(Self {
+            client,
+            client_id,
+            client_secret,
+            domain,
+        })
+    }
+
+    fn authorization_endpoint(&self) -> String {
+        format!("https://{}/oauth2/v1/authorize", self.domain)
+    }
+
+    fn token_endpoint(&self) -> String {
+        format!("https://{}/oauth2/v1/token", self.domain)
+    }
+
+    fn userinfo_endpoint(&self) -> String {
+        format!("https://{}/oauth2/v1/userinfo", self.domain)
+    }
+
+    async fn try_refresh_access_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<ProviderTokenDetails, TokenValidationError> {
+        let response = match self
+            .client
+            .post(self.token_endpoint())
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Err(TokenValidationError::temporary(format!(
+                    "refresh request failed: {err}"
+                )));
+            }
+        };
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                #[derive(Debug, Deserialize)]
+                struct RefreshResponse {
+                    access_token: String,
+                    expires_in: i64,
+                    #[serde(default)]
+                    refresh_token: Option<String>,
+                }
+
+                let refresh_data: RefreshResponse = response
+                    .json()
+                    .await
+                    .map_err(|err| TokenValidationError::temporary(format!("{err}")))?;
+                let expires_at = chrono::Utc::now().timestamp() + refresh_data.expires_in;
+
+                let new_refresh_token = refresh_data
+                    .refresh_token
+                    .unwrap_or_else(|| refresh_token.to_string());
+
+                Ok(ProviderTokenDetails {
+                    provider: self.name().to_string(),
+                    access_token: refresh_data.access_token,
+                    refresh_token: Some(new_refresh_token),
+                    expires_at: Some(expires_at),
+                })
+            }
+            reqwest::StatusCode::BAD_REQUEST => Err(TokenValidationError::InvalidOrRevoked),
+            status if status.is_server_error() => Err(TokenValidationError::temporary(format!(
+                "token refresh server error: {status}"
+            ))),
+            status => Err(TokenValidationError::temporary(format!(
+                "unexpected token refresh status: {status}"
+            ))),
+        }
+    }
+
+    async fn refresh_token(
+        &self,
+        refresh_token: &str,
+        max_retries: u32,
+    ) -> Result<ProviderTokenDetails, TokenValidationError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+
+            match self.try_refresh_access_token(refresh_token).await {
+                Ok(new_token_details) => return Ok(new_token_details),
+                Err(TokenValidationError::InvalidOrRevoked) => {
+                    return Err(TokenValidationError::InvalidOrRevoked);
+                }
+                Err(TokenValidationError::Temporary(err)) => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::Temporary(err));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OktaTokenResponse {
+    Success {
+        access_token: String,
+        token_type: String,
+        scope: Option<String>,
+        expires_in: Option<i64>,
+        refresh_token: Option<String>,
+        id_token: Option<String>,
+    },
+    Error {
+        error: String,
+        error_description: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct OktaUser {
+    sub: String,
+    name: Option<String>,
+    email: Option<String>,
+    email_verified: Option<bool>,
+    picture: Option<String>,
+}
+
+#[async_trait]
+impl AuthorizationProvider for OktaOAuthProvider {
+    fn name(&self) -> &'static str {
+        "okta"
+    }
+
+    fn scopes(&self) -> &[&str] {
+        &["openid", "profile", "email"]
+    }
+
+    fn authorize_url(&self, state: &str, redirect_uri: &str) -> Result<Url> {
+        let mut url = Url::parse(&self.authorization_endpoint())?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("client_id", &self.client_id);
+            qp.append_pair("redirect_uri", redirect_uri);
+            qp.append_pair("response_type", "code");
+            qp.append_pair("scope", &self.scopes().join(" "));
+            qp.append_pair("state", state);
+            qp.append_pair("response_mode", "query");
+        }
+        Ok(url)
+    }
+
+    async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<AuthorizationGrant> {
+        let response = self
+            .client
+            .post(self.token_endpoint())
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+                ("code", code),
+                ("grant_type", "authorization_code"),
+                ("redirect_uri", redirect_uri),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+
+        match response.json::<OktaTokenResponse>().await? {
+            OktaTokenResponse::Success {
+                access_token,
+                token_type,
+                scope,
+                expires_in,
+                refresh_token,
+                id_token,
+            } => {
+                let scopes = scope
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|value| {
+                        let trimmed = value.trim();
+                        (!trimmed.is_empty()).then_some(trimmed.to_string())
+                    })
+                    .collect();
+
+                Ok(AuthorizationGrant {
+                    access_token: SecretString::new(access_token.into()),
+                    token_type,
+                    scopes,
+                    refresh_token: refresh_token.map(|v| SecretString::new(v.into())),
+                    expires_in: expires_in.map(Duration::seconds),
+                    id_token: id_token.map(|v| SecretString::new(v.into())),
+                })
+            }
+            OktaTokenResponse::Error {
+                error,
+                error_description,
+            } => {
+                let detail = error_description.unwrap_or_else(|| error.clone());
+                anyhow::bail!("okta token exchange failed: {detail}")
+            }
+        }
+    }
+
+    async fn fetch_user(&self, access_token: &SecretString) -> Result<ProviderUser> {
+        let bearer = format!("Bearer {}", access_token.expose_secret());
+
+        let profile: OktaUser = self
+            .client
+            .get(self.userinfo_endpoint())
+            .header("Authorization", bearer)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let login = profile.email.clone();
+
+        Ok(ProviderUser {
+            id: profile.sub,
+            login,
+            email: profile.email,
+            name: profile.name,
+            avatar_url: profile.picture,
+        })
+    }
+
+    async fn validate_token(
+        &self,
+        token_details: &ProviderTokenDetails,
+        max_retries: u32,
+    ) -> Result<Option<ProviderTokenDetails>, TokenValidationError> {
+        let mut attempt = 0;
+        let access_token = SecretString::new(token_details.access_token.clone().into_boxed_str());
+
+        loop {
+            attempt += 1;
+
+            if let Some(expires_at) = token_details.expires_at
+                && let now = chrono::Utc::now().timestamp()
+                && now >= expires_at - TOKEN_EXPIRATION_LEEWAY_SECONDS
+            {
+                let Some(refresh_token) = &token_details.refresh_token else {
+                    return Err(TokenValidationError::InvalidOrRevoked);
+                };
+
+                info!("Token expired, attempting refresh for Okta OAuth");
+                return self
+                    .refresh_token(refresh_token, max_retries)
+                    .await
+                    .map(Some);
+            }
+
+            let response = match self
+                .client
+                .get(self.userinfo_endpoint())
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", access_token.expose_secret()),
+                )
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "userinfo request failed: {err}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                    continue;
+                }
+            };
+
+            match response.status() {
+                reqwest::StatusCode::OK => {
+                    return Ok(None);
+                }
+                reqwest::StatusCode::UNAUTHORIZED => {
+                    let Some(refresh_token) = &token_details.refresh_token else {
+                        return Err(TokenValidationError::InvalidOrRevoked);
+                    };
+                    info!("Token expired during validation, attempting refresh");
+                    return self
+                        .refresh_token(refresh_token, max_retries)
+                        .await
+                        .map(Some);
+                }
+                status if status.is_server_error() => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "okta userinfo server error: {status}"
+                        )));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
+                        .await;
+                }
+                status => {
+                    if attempt >= max_retries {
+                        return Err(TokenValidationError::temporary(format!(
+                            "unexpected userinfo status: {status}"
                         )));
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_INTERVAL_SECONDS))
